@@ -1,0 +1,15 @@
+{
+  "name": "multi-node-websocket",
+  "version": "1.0.0",
+  "description": "A simple Node.js WebSocket server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": ["websocket", "node"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "ws": "^8.14.2"
+  }
+}

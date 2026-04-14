@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebSocket Client</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 2rem;
+            max-width: 48rem;
+        }
+
+        .row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-bottom: 0.75rem;
+        }
+
+        input {
+            padding: 0.5rem;
+            min-width: 12rem;
+        }
+
+        button {
+            padding: 0.5rem 0.75rem;
+        }
+
+        #messages {
+            border: 1px solid #ccc;
+            min-height: 14rem;
+            padding: 0.75rem;
+            overflow-y: auto;
+        }
+
+        #messages p {
+            margin: 0 0 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <h1>WebSocket Client</h1>
+    <div class="row">
+        <input type="text" id="nameInput" placeholder="Enter your name">
+        <button onclick="joinChat()">Join</button>
+    </div>
+    <div class="row">
+        <input type="text" id="topicInput" placeholder="Topic name" value="lobby" disabled>
+        <button onclick="subscribeToTopic()" id="subscribeButton" disabled>Subscribe</button>
+        <button onclick="unsubscribeFromTopic()" id="unsubscribeButton" disabled>Unsubscribe</button>
+        <button onclick="listSubscriptions()" id="listButton" disabled>List</button>
+    </div>
+    <div class="row">
+        <input type="text" id="messageInput" placeholder="Enter a message" disabled>
+        <button onclick="sendMessage()" id="sendButton" disabled>Send to Topic</button>
+    </div>
+    <div id="messages"></div>
+
+    <script>
+        let ws;
+        let userName = '';
+
+        function setConnectedState(connected) {
+            document.getElementById('nameInput').disabled = connected;
+            document.getElementById('topicInput').disabled = !connected;
+            document.getElementById('messageInput').disabled = !connected;
+            document.getElementById('sendButton').disabled = !connected;
+            document.getElementById('subscribeButton').disabled = !connected;
+            document.getElementById('unsubscribeButton').disabled = !connected;
+            document.getElementById('listButton').disabled = !connected;
+        }
+
+        function sendAction(payload) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                addMessage('Join the chat before sending commands.');
+                return false;
+            }
+
+            ws.send(JSON.stringify(payload));
+            return true;
+        }
+
+        function getTopic() {
+            return document.getElementById('topicInput').value.trim();
+        }
+
+        function addMessage(text) {
+            const messagesDiv = document.getElementById('messages');
+            const message = document.createElement('p');
+            message.textContent = text;
+            messagesDiv.appendChild(message);
+        }
+
+        function joinChat() {
+            const nameInput = document.getElementById('nameInput');
+            const trimmedName = nameInput.value.trim();
+
+            if (!trimmedName) {
+                addMessage('Enter your name before joining.');
+                return;
+            }
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                return;
+            }
+
+            userName = trimmedName;
+            ws = new WebSocket(`ws://localhost:8080?name=${encodeURIComponent(userName)}`);
+
+            ws.onopen = () => {
+                console.log('Connected to server');
+                setConnectedState(true);
+                addMessage(`Joined as ${userName}`);
+                addMessage('Use the topic controls to subscribe or unsubscribe from rooms.');
+            };
+
+            ws.onmessage = (event) => {
+                addMessage(event.data);
+            };
+
+            ws.onclose = () => {
+                console.log('Disconnected from server');
+                setConnectedState(false);
+                addMessage('Disconnected from server');
+            };
+
+            ws.onerror = () => {
+                addMessage('Unable to connect to the server.');
+            };
+        }
+
+        function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const topic = getTopic();
+            const message = input.value.trim();
+
+            if (!topic) {
+                addMessage('Enter a topic before sending a message.');
+                return;
+            }
+
+            if (!message) {
+                return;
+            }
+
+            if (!sendAction({ action: 'publish', topic, message })) {
+                return;
+            }
+
+            input.value = '';
+        }
+
+        function subscribeToTopic() {
+            const topic = getTopic();
+
+            if (!topic) {
+                addMessage('Enter a topic to subscribe.');
+                return;
+            }
+
+            sendAction({ action: 'subscribe', topic });
+        }
+
+        function unsubscribeFromTopic() {
+            const topic = getTopic();
+
+            if (!topic) {
+                addMessage('Enter a topic to unsubscribe.');
+                return;
+            }
+
+            sendAction({ action: 'unsubscribe', topic });
+        }
+
+        function listSubscriptions() {
+            sendAction({ action: 'list' });
+        }
+
+        setConnectedState(false);
+    </script>
+</body>
+</html>
