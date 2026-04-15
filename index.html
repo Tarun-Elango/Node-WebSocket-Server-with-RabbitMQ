@@ -104,7 +104,7 @@
             }
 
             userName = trimmedName;
-            ws = new WebSocket(`ws://localhost:8080?name=${encodeURIComponent(userName)}`);
+            ws = new WebSocket(`wss://node-websocket-server-with-rabbitmq-production.up.railway.app?name=${encodeURIComponent(userName)}`);
 
             ws.onopen = () => {
                 console.log('Connected to server');
