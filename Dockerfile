@@ -13,3 +13,4 @@ COPY server/ ./
 EXPOSE 8080
 
 CMD ["npm", "start"]
+# This Dockerfile is only for the server part

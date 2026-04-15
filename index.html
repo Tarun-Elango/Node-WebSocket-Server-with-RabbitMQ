@@ -21,8 +21,18 @@
             min-width: 12rem;
         }
 
+        #serverUrlInput {
+            min-width: 28rem;
+        }
+
         button {
             padding: 0.5rem 0.75rem;
+        }
+
+        .hint {
+            color: #555;
+            font-size: 0.9rem;
+            margin: -0.25rem 0 0.75rem;
         }
 
         #messages {
@@ -39,6 +49,10 @@
 </head>
 <body>
     <h1>WebSocket Client</h1>
+    <div class="row">
+        <input type="text" id="serverUrlInput" placeholder="WebSocket URL" value="wss://mellow-alignment-production-3f08.up.railway.app">
+    </div>
+    <p class="hint">Example: <code>ws://localhost:8080</code> or <code>wss://your-app.up.railway.app</code></p>
     <div class="row">
         <input type="text" id="nameInput" placeholder="Enter your name">
         <button onclick="joinChat()">Join</button>
@@ -58,8 +72,12 @@
     <script>
         let ws;
         let userName = '';
+        const defaultServerUrl = 'wss://mellow-alignment-production-3f08.up.railway.app';
+
+        initializeServerUrl();
 
         function setConnectedState(connected) {
+            document.getElementById('serverUrlInput').disabled = connected;
             document.getElementById('nameInput').disabled = connected;
             document.getElementById('topicInput').disabled = !connected;
             document.getElementById('messageInput').disabled = !connected;
@@ -67,6 +85,38 @@
             document.getElementById('subscribeButton').disabled = !connected;
             document.getElementById('unsubscribeButton').disabled = !connected;
             document.getElementById('listButton').disabled = !connected;
+        }
+
+        function initializeServerUrl() {
+            const savedUrl = localStorage.getItem('wsServerUrl');
+            if (savedUrl) {
+                document.getElementById('serverUrlInput').value = savedUrl;
+            }
+        }
+
+        function getNormalizedServerUrl() {
+            const input = document.getElementById('serverUrlInput');
+            const rawValue = input.value.trim();
+
+            if (!rawValue) {
+                return '';
+            }
+
+            const withProtocol = /^wss?:\/\//i.test(rawValue)
+                ? rawValue
+                : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${rawValue}`;
+
+            try {
+                const url = new URL(withProtocol);
+
+                if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
+                    return '';
+                }
+
+                return url.toString().replace(/\/$/, '');
+            } catch {
+                return '';
+            }
         }
 
         function sendAction(payload) {
@@ -93,9 +143,15 @@
         function joinChat() {
             const nameInput = document.getElementById('nameInput');
             const trimmedName = nameInput.value.trim();
+            const serverUrl = getNormalizedServerUrl();
 
             if (!trimmedName) {
                 addMessage('Enter your name before joining.');
+                return;
+            }
+
+            if (!serverUrl) {
+                addMessage('Enter a valid WebSocket URL before joining.');
                 return;
             }
 
@@ -104,12 +160,17 @@
             }
 
             userName = trimmedName;
-            ws = new WebSocket(`wss://node-websocket-server-with-rabbitmq-production.up.railway.app?name=${encodeURIComponent(userName)}`); // change this to your server URL ( get the public url from railway dashboard and replace the URL here )
+            localStorage.setItem('wsServerUrl', serverUrl || defaultServerUrl);
+
+            const wsUrl = new URL(serverUrl);
+            wsUrl.searchParams.set('name', userName);
+            ws = new WebSocket(wsUrl.toString());
 
             ws.onopen = () => {
                 console.log('Connected to server');
                 setConnectedState(true);
                 addMessage(`Joined as ${userName}`);
+                addMessage(`Connected to ${serverUrl}`);
                 addMessage('Use the topic controls to subscribe or unsubscribe from rooms.');
             };
 
