@@ -60,21 +60,37 @@ function fanOutToLocalSubscribers(topic, formattedMessage) {
 
 async function bindTopicToNodeQueue(topic) {
   if (rabbitBoundTopics.has(topic)) {
+    console.log(`[RabbitMQ] Topic "${topic}" already bound to queue`);
     return;
   }
 
-  // bind the topic to this node's RabbitMQ queue
-  await rabbitSubscriberChannel.bindQueue(rabbitQueueName, RABBITMQ_EXCHANGE, topic);
-  rabbitBoundTopics.add(topic);
+  try {
+    console.log(`[RabbitMQ] Binding topic "${topic}" to queue ${rabbitQueueName}...`);
+    // bind the topic to this node's RabbitMQ queue
+    await rabbitSubscriberChannel.bindQueue(rabbitQueueName, RABBITMQ_EXCHANGE, topic);
+    rabbitBoundTopics.add(topic);
+    console.log(`[RabbitMQ] Successfully bound topic "${topic}" to queue ${rabbitQueueName}`);
+  } catch (error) {
+    console.error(`[RabbitMQ] Failed to bind topic "${topic}": ${error.message}`);
+    throw error;
+  }
 }
 
 async function unbindTopicFromNodeQueue(topic) {
   if (!rabbitBoundTopics.has(topic)) {
+    console.log(`[RabbitMQ] Topic "${topic}" is not bound to queue`);
     return;
   }
 
-  await rabbitSubscriberChannel.unbindQueue(rabbitQueueName, RABBITMQ_EXCHANGE, topic);
-  rabbitBoundTopics.delete(topic);
+  try {
+    console.log(`[RabbitMQ] Unbinding topic "${topic}" from queue ${rabbitQueueName}...`);
+    await rabbitSubscriberChannel.unbindQueue(rabbitQueueName, RABBITMQ_EXCHANGE, topic);
+    rabbitBoundTopics.delete(topic);
+    console.log(`[RabbitMQ] Successfully unbound topic "${topic}" from queue ${rabbitQueueName}`);
+  } catch (error) {
+    console.error(`[RabbitMQ] Failed to unbind topic "${topic}": ${error.message}`);
+    throw error;
+  }
 }
 
 function removeLocalSubscription(ws, topic) {
@@ -96,12 +112,20 @@ function removeLocalSubscription(ws, topic) {
 }
 
 async function initializeRabbitMq() {
+  console.log(`[RabbitMQ] Connecting...`);
   rabbitConnection = await amqp.connect(RABBITMQ_URL);
+  console.log(`[RabbitMQ] Connection established`);
+
+  console.log(`[RabbitMQ] Creating publisher channel (confirm channel)...`);
   rabbitPublisherChannel = await rabbitConnection.createConfirmChannel();
+  console.log(`[RabbitMQ] Publisher channel created`);
+
+  console.log(`[RabbitMQ] Creating subscriber channel...`);
   rabbitSubscriberChannel = await rabbitConnection.createChannel();
+  console.log(`[RabbitMQ] Subscriber channel created`);
 
   rabbitConnection.on('error', (error) => {
-    console.error(`RabbitMQ connection error: ${error.message}`);
+    console.error(`[RabbitMQ] Connection error: ${error.message}`);
   });
 
   rabbitConnection.on('close', () => {
@@ -109,13 +133,19 @@ async function initializeRabbitMq() {
       return;
     }
 
-    console.error('RabbitMQ connection closed. Exiting so the process manager can restart this node.');
+    console.error('[RabbitMQ] Connection closed unexpectedly. Exiting so the process manager can restart this node.');
     process.exit(1);
   });
 
+  console.log(`[RabbitMQ] Asserting exchange "${RABBITMQ_EXCHANGE}" on publisher channel...`);
   await rabbitPublisherChannel.assertExchange(RABBITMQ_EXCHANGE, 'topic', { durable: false });
-  await rabbitSubscriberChannel.assertExchange(RABBITMQ_EXCHANGE, 'topic', { durable: false });
+  console.log(`[RabbitMQ] Exchange "${RABBITMQ_EXCHANGE}" asserted on publisher channel`);
 
+  console.log(`[RabbitMQ] Asserting exchange "${RABBITMQ_EXCHANGE}" on subscriber channel...`);
+  await rabbitSubscriberChannel.assertExchange(RABBITMQ_EXCHANGE, 'topic', { durable: false });
+  console.log(`[RabbitMQ] Exchange "${RABBITMQ_EXCHANGE}" asserted on subscriber channel`);
+
+  console.log(`[RabbitMQ] Creating exclusive auto-delete queue...`);
   const { queue } = await rabbitSubscriberChannel.assertQueue('', {
     autoDelete: true,
     durable: false,
@@ -123,8 +153,9 @@ async function initializeRabbitMq() {
   });
 
   rabbitQueueName = queue;
+  console.log(`[RabbitMQ] Queue created: ${rabbitQueueName}`);
 
-
+  console.log(`[RabbitMQ] Starting message consumption on queue ${rabbitQueueName}...`);
   // this will receive messages published by this node as well as messages from other nodes for topics this node is subscribed to
   await rabbitSubscriberChannel.consume(rabbitQueueName, (message) => {
     if (!message) {
@@ -136,18 +167,20 @@ async function initializeRabbitMq() {
       const topic = normalizeTopic(message.fields.routingKey || payload.topic);
 
       if (!topic || typeof payload.formattedMessage !== 'string') {
+        console.warn(`[RabbitMQ] Discarding malformed message: invalid topic or message format`);
         return;
       }
 
+      console.log(`[RabbitMQ] Received message on topic "${topic}" from node ${payload.nodeId}: ${payload.formattedMessage}`);
       fanOutToLocalSubscribers(topic, payload.formattedMessage);
     } catch (error) {
-      console.error(`Failed to process RabbitMQ message: ${error.message}`);
+      console.error(`[RabbitMQ] Failed to process message: ${error.message}`);
     } finally {
       rabbitSubscriberChannel.ack(message);
     }
   });
 
-  console.log(`RabbitMQ connected at ${RABBITMQ_URL}; node id ${NODE_ID}`);
+  console.log(`[RabbitMQ] Successfully initialized - Connected Queue: ${rabbitQueueName}`);
 }
 
 async function subscribeClient(ws, topic) {
@@ -171,13 +204,14 @@ async function subscribeClient(ws, topic) {
   // get existing subscribers for this topic (if any) and add this client to the set
   topicSubscribers.get(normalizedTopic).add(ws);
   ws.subscriptions.add(normalizedTopic);
+  console.log(`[RabbitMQ] Client "${ws.userName}" subscribed to topic "${normalizedTopic}" (local subscribers: ${topicSubscribers.get(normalizedTopic).size})`);
 
   if (topicSubscribers.get(normalizedTopic).size === 1) {// only add RabbitMQ binding if this is the first subscriber for the topic on this node
     try {
       await bindTopicToNodeQueue(normalizedTopic);
     } catch (error) {
       removeLocalSubscription(ws, normalizedTopic);
-      console.error(`Failed to bind topic "${normalizedTopic}" to RabbitMQ: ${error.message}`);
+      console.error(`[RabbitMQ] Failed to subscribe to topic "${normalizedTopic}": ${error.message}`);
       sendSystemMessage(ws, `Unable to subscribe to "${normalizedTopic}" right now.`);
       return false;
     }
@@ -201,12 +235,13 @@ async function unsubscribeClient(ws, topic) {
   }
 
   const removedLastSubscriber = removeLocalSubscription(ws, normalizedTopic);
+  console.log(`[RabbitMQ] Client "${ws.userName}" unsubscribed from topic "${normalizedTopic}"`);
 
   if (removedLastSubscriber) {
     try {
       await unbindTopicFromNodeQueue(normalizedTopic);
     } catch (error) {
-      console.error(`Failed to unbind topic "${normalizedTopic}" from RabbitMQ: ${error.message}`);
+      console.error(`[RabbitMQ] Failed to unbind topic "${normalizedTopic}" during unsubscribe: ${error.message}`);
     }
   }
 
@@ -241,23 +276,34 @@ async function publishToTopic(ws, topic, message) {
   const formattedMessage = `[${normalizedTopic}] ${ws.userName}: ${text}`;
   console.log(`Received: ${formattedMessage}`);
 
+  const brokerMessage = serializeBrokerMessage(normalizedTopic, formattedMessage, ws.userName);
+  
+  try {
+    console.log(`[RabbitMQ] Publishing message to topic "${normalizedTopic}" (routing key) on exchange "${RABBITMQ_EXCHANGE}"...`);
+    // publish to RabbitMQ so it can be delivered to subscribers on this node as well as other nodes
+    rabbitPublisherChannel.publish(
+      RABBITMQ_EXCHANGE,
+      normalizedTopic,// routing key is the topic
+      Buffer.from(brokerMessage),
+      {
+        contentType: 'application/json',
+        persistent: false,
+      }
+    );
 
-  // publish to RabbitMQ so it can be delivered to subscribers on this node as well as other nodes
-  rabbitPublisherChannel.publish(
-    RABBITMQ_EXCHANGE,
-    normalizedTopic,// routing key is the topic
-    Buffer.from(serializeBrokerMessage(normalizedTopic, formattedMessage, ws.userName)),
-    {
-      contentType: 'application/json',
-      persistent: false,
-    }
-  );
-
-  await rabbitPublisherChannel.waitForConfirms();
+    console.log(`[RabbitMQ] Message published to topic "${normalizedTopic}". Waiting for confirmation...`);
+    await rabbitPublisherChannel.waitForConfirms();
+    console.log(`[RabbitMQ] Publish confirmation received for topic "${normalizedTopic}"`);
+  } catch (error) {
+    console.error(`[RabbitMQ] Failed to publish message to topic "${normalizedTopic}": ${error.message}`);
+    throw error;
+  }
 }
 
 async function removeClientFromAllTopics(ws) {
   const topics = Array.from(ws.subscriptions);
+
+  console.log(`[RabbitMQ] Cleaning up ${topics.length} subscriptions for disconnecting client "${ws.userName}": ${topics.join(', ')}`);
 
   for (const topic of topics) {
     const removedLastSubscriber = removeLocalSubscription(ws, topic);
@@ -266,7 +312,7 @@ async function removeClientFromAllTopics(ws) {
       try {
         await unbindTopicFromNodeQueue(topic);
       } catch (error) {
-        console.error(`Failed to unbind topic "${topic}" during disconnect: ${error.message}`);
+        console.error(`[RabbitMQ] Failed to unbind topic "${topic}" during client disconnect: ${error.message}`);
       }
     }
   }
@@ -338,15 +384,33 @@ async function shutdown(signal) {
   }
 
   if (rabbitPublisherChannel) {
-    await rabbitPublisherChannel.close().catch(() => {});
+    try {
+      console.log(`[RabbitMQ] Closing publisher channel...`);
+      await rabbitPublisherChannel.close();
+      console.log(`[RabbitMQ] Publisher channel closed`);
+    } catch (error) {
+      console.error(`[RabbitMQ] Error closing publisher channel: ${error.message}`);
+    }
   }
 
   if (rabbitSubscriberChannel) {
-    await rabbitSubscriberChannel.close().catch(() => {});
+    try {
+      console.log(`[RabbitMQ] Closing subscriber channel...`);
+      await rabbitSubscriberChannel.close();
+      console.log(`[RabbitMQ] Subscriber channel closed`);
+    } catch (error) {
+      console.error(`[RabbitMQ] Error closing subscriber channel: ${error.message}`);
+    }
   }
 
   if (rabbitConnection) {
-    await rabbitConnection.close().catch(() => {});
+    try {
+      console.log(`[RabbitMQ] Closing connection...`);
+      await rabbitConnection.close();
+      console.log(`[RabbitMQ] Connection closed`);
+    } catch (error) {
+      console.error(`[RabbitMQ] Error closing connection: ${error.message}`);
+    }
   }
 
   process.exit(0);
