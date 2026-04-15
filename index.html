@@ -104,7 +104,7 @@
             }
 
             userName = trimmedName;
-            ws = new WebSocket(`wss://node-websocket-server-with-rabbitmq-production.up.railway.app?name=${encodeURIComponent(userName)}`);
+            ws = new WebSocket(`wss://node-websocket-server-with-rabbitmq-production.up.railway.app?name=${encodeURIComponent(userName)}`); // change this to your server URL ( get the public url from railway dashboard and replace the URL here )
 
             ws.onopen = () => {
                 console.log('Connected to server');
