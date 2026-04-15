@@ -11,6 +11,7 @@ const { URL } = require('url');
 const PORT = Number(process.env.PORT) || 8080;
 const DEFAULT_TOPIC = process.env.DEFAULT_TOPIC || 'lobby';
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://localhost'; // add a environment variable RABBITMQ_URL, which should connect to your RabbitMQ instances public URL. For example: amqp://username:password@your-rabbitmq-internal-url:5672
+const RABBITMQ_EXCHANGE = process.env.RABBITMQ_EXCHANGE || 'ws.topics';
 const NODE_ID = process.env.NODE_ID || randomUUID();
 const topicSubscribers = new Map();
 const rabbitBoundTopics = new Set();
