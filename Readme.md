@@ -16,7 +16,7 @@ A Node.js WebSocket server using the `ws` library and `RabbitMQ` for multi-node 
 
 **Why do we need this?** Say we have a chat app that connects to a WebSocket server. The websocket connection is stateful, i.e the server needs to remember which clients are subscribed to which topics. If we want to scale this app horizontally across multiple server instances, we need a way for those instances to share topic membership and publish messages to each other. 
 
-**For example:** Alice connects to Node 1 and subscribes to `sports`. Bob connects to Node 2 and also subscribes to `sports`. If Alice publishes a message to `sports`, how does that message get to Bob if they are connected to different server nodes?
+**Example:** Alice connects to Node 1 and subscribes to `sports`. Bob connects to Node 2 and also subscribes to `sports`. If Alice publishes a message to `sports`, how does that message get to Bob if they are connected to different server nodes?
 
 **Solution:** We use RabbitMQ as the message broker. On server start, the server connects to RabbitMQ and creates a unique queue for that node in RabbitMQ. When a client subscribes to a topic ( or a room ) on that node, the server binds its queue to that topic. When a message is published to a topic, RabbitMQ fans it out to every server node that has its queue bound to the topic. Each server node then forwards the message only to its own local clients for that topic.
 
@@ -41,6 +41,10 @@ This way we can run multiple instances of this WebSocket server, and ensure all 
 ### RabbitMQ Delivery Model
 
 Each node owns one exclusive RabbitMQ queue. Topic bindings on that queue are added and removed dynamically as local clients subscribe and unsubscribe.
+
+**Server startup:** When a node starts, it connects to RabbitMQ and creates a unique, exclusive queue for itself. This queue serves as the node's message inbox for all topics its clients are subscribed to.
+
+**Client joins a topic (binding process):** When a client subscribes to a topic on a node, the server immediately binds that node's queue to the topic's routing key in RabbitMQ. This tells RabbitMQ to start routing messages with that topic to this node's queue. If multiple clients on the same node subscribe to the same topic, the binding only happens once (the binding is already in place).
 
 **Message flow (client publish → all subscribers):**
 
@@ -95,16 +99,18 @@ node2Queue → ['lobby', 'sports']
 
 ### Message Protocol
 
-Clients can continue sending plain text messages, which will be published to the default `lobby` topic.
+The server accepts two types of client messages:
 
-For room-based behavior, send JSON messages with one of these actions:
+**1. Simple messaging** — Plain text messages are automatically published to the `lobby` topic and delivered to all connected clients.
 
-```json
-{ "action": "subscribe", "topic": "sports" }
-{ "action": "unsubscribe", "topic": "sports" }
-{ "action": "publish", "topic": "sports", "message": "Hello room" }
-{ "action": "list" }
-```
+**2. Topic-based messaging** — Send JSON messages to join/leave topics or broadcast to a specific audience:
+
+| Action | Purpose | Example |
+|---|---|---|
+| `subscribe` | Join a topic to receive all messages sent to it | `{ "action": "subscribe", "topic": "sports" }` |
+| `unsubscribe` | Leave a topic and stop receiving its messages | `{ "action": "unsubscribe", "topic": "sports" }` |
+| `publish` | Send a message to a specific topic | `{ "action": "publish", "topic": "sports", "message": "Hello room" }` |
+| `list` | Get all topics you're currently subscribed to | `{ "action": "list" }` |
 
 ### Example Topic Flow
 
@@ -189,9 +195,9 @@ Browser flow:
 
 ---
 
-# Deploy and Test the Server
+## Testing
 
-Use Railway (or any cloud provider) to deploy the WebSocket server and RabbitMQ.
+To test cross-node messaging, you need at least two server instances connected to the same RabbitMQ instance. The steps below use Railway to deploy them, but any hosting provider works.
 
 ### 1. Deploy RabbitMQ
 
@@ -202,7 +208,10 @@ Use Railway (or any cloud provider) to deploy the WebSocket server and RabbitMQ.
    - `RABBITMQ_DEFAULT_PASS=strongpassword`
    - `RABBITMQ_DEFAULT_VHOST=/` (allows multiple apps to coexist)
 4. *(Optional)* For the management UI, create a public URL in **Settings → Network** and expose port `15672`
-5. Add a volume at `/var/lib/rabbitmq` for data persistence
+5. Add a volume at `/var/lib/rabbitmq` for data persistence:
+   - On the dashboard, create a new volume
+   - Select the RabbitMQ instance
+   - Add the path `/var/lib/rabbitmq` and deploy
 
 ### 2. Deploy Server Instances
 
@@ -213,21 +222,22 @@ For each server instance (repeat steps for Server 1 and Server 2):
 3. In **Settings → Network**, create a public URL (you'll need this for client testing)
 4. In **Variables**, add:
    - `RABBITMQ_URL=amqp://admin:strongpassword@rabbitmq.railway.internal:5672`
-   - (Replace hostname with your RabbitMQ service URL if different)
+   - (Replace hostname with your RabbitMQ internal URL if different, you can find this in the RabbitMQ service's network settings)
 5. Deploy the service
 
-Repeat for a second server instance to test multi-node messaging.
+Repeat the same steps and create a second server instance to test multi-node messaging.
+After these steps, you should have two WebSocket server instances running, with their own public URLs, both connected to the same RabbitMQ instance.
 
-### 3. Test with the Client
+![Alt text](../images/rabbitMq/1.png)  <!-- showing rabbitmq and two server instances in railway dashboard -->
 
-1. Serve the `index.html` file locally:
-   - Python: `python3 -m http.server`
-   - Node: `npx http-server`
-2. Open `http://localhost:8000` in your browser
-3. Enter the public URL of Server 1 (e.g., `wss://your-server-1-url.railway.app`)
-4. Enter your name and click **Join**
-5. Open a second tab and connect to Server 2 with its public URL (e.g., `wss://your-server-2-url.railway.app`) using a different name
-6. Subscribe to the same topic (e.g., `sports`) in both tabs
-7. Send a message from one tab—it will appear in the other, proving cross-node communication works
+### 3. Test with the Browser Client
+
+A full browser client is included in `index.html` in the [repository](https://github.com/Tarun-Elango/Node-WebSocket-Server-with-RabbitMQ). Serve it locally using Python (`python3 -m http.server`) or Node (`npx http-server`), then open `http://localhost:8000` in your browser.
+
+1. Enter the public URL of Server 1 (e.g., `wss://your-server-1-url.railway.app`), enter your name, and click **Join**
+2. Open a second tab, connect to Server 2's public URL with a different name, and click **Join**
+3. Subscribe to the same topic (e.g., `sports`) in both tabs
+4. Send a message from one tab — it will appear in the other, proving cross-node communication works
+5. Unsubscribe from the topic in one tab and verify new messages stop arriving there
 
 Check server logs to verify that RabbitMQ is routing messages and that topic bindings are dynamically added/removed as clients subscribe/unsubscribe.
