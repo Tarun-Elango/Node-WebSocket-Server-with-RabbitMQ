@@ -1,16 +1,99 @@
 # Multi Node WebSocket Server
 
-A simple Node.js WebSocket server using the `ws` library.
+## Content
+- [About](#about)
+- [Architecture Explanation](#architecture-explanation)
+- [Client Testing](#client-testing)
+- [Deploy and Test](#deploy-and-test)
 
-## Features
+<br>
 
-- Accepts WebSocket connections on `ws://localhost:8080`
-- Automatically subscribes each client to the `lobby` topic
-- Supports topic subscriptions and unsubscriptions
-- Publishes messages only to clients subscribed to the same topic
-- Handles client connections, disconnections, and errors
+---
 
-## Message Protocol
+# About
+
+A Node.js WebSocket server using the `ws` library and `RabbitMQ` for multi-node fan-out.
+
+**Why do we need this?** Say we have a chat app that connects to a WebSocket server. The websocket connection is stateful, i.e the server needs to remember which clients are subscribed to which topics. If we want to scale this app horizontally across multiple server instances, we need a way for those instances to share topic membership and publish messages to each other. 
+
+**For example:** Alice connects to Node 1 and subscribes to `sports`. Bob connects to Node 2 and also subscribes to `sports`. If Alice publishes a message to `sports`, how does that message get to Bob if they are connected to different server nodes?
+
+**Solution:** We use RabbitMQ as the message broker. On server start, the server connects to RabbitMQ and creates a unique queue for that node in RabbitMQ. When a client subscribes to a topic ( or a room ) on that node, the server binds its queue to that topic. When a message is published to a topic, RabbitMQ fans it out to every server node that has its queue bound to the topic. Each server node then forwards the message only to its own local clients for that topic.
+
+This way we can run multiple instances of this WebSocket server, and ensure all the clients receive the messages regardless of which node they are connected to.
+
+<br>
+
+---
+
+# Architecture Explanation
+
+### Server Behavior
+
+| Behavior | Detail |
+|---|---|
+| On connect | Client receives a welcome message and is subscribed to `lobby` |
+| Subscriptions | Clients can subscribe or unsubscribe from topics at any time |
+| State | Each node keeps only its own local WebSocket connections in memory |
+| Plain text messages | Treated as a publish to the default `lobby` topic |
+| Cross-node messaging | Handled exclusively via RabbitMQ — nodes never talk directly to each other |
+
+### RabbitMQ Delivery Model
+
+Each node owns one exclusive RabbitMQ queue. Topic bindings on that queue are added and removed dynamically as local clients subscribe and unsubscribe.
+
+**Message flow (client publish → all subscribers):**
+
+1. Client sends a `publish` action to its connected node.
+2. That node publishes once to the RabbitMQ topic exchange.
+3. RabbitMQ copies the message to every node queue bound to that topic.
+4. Each node consumes from its own queue and forwards the message to its local subscribers.
+
+**Why bindings are dynamic — topic `sports` example:**
+
+Node 2 only binds its queue to `sports` *while* Bob (a local client) is subscribed. When Bob unsubscribes, Node 2 removes the binding to stop wasting broker resources:
+
+```text
+State 1: Both nodes have subscribers
+  Node 1 queue ← sports
+  Node 2 queue ← sports
+
+State 2: Bob unsubscribes (Node 2's only sports subscriber)
+  Node 1 queue ← sports
+  Node 2 queue ← (removed: no local subscribers)
+```
+
+After unbinding, new `sports` publishes only go to Node 1's queue.
+
+### State Layout
+
+The server maintains two complementary data structures in memory:
+
+| Structure | Location | Purpose |
+|---|---|---|
+| `topicSubscribers` | On the server | Map: topic → all local WebSocket clients subscribed to it |
+| `ws.subscriptions` | On each client connection | Set: all topics that client has joined |
+
+**Why two structures?** One answers "who's subscribed to topic X?" and the other answers "what topics is client Y in?"
+
+**Example state** after Alice (Node 1) and Bob (Node 2) both subscribe to `sports`:
+
+```js
+// Server-level maps
+node1.topicSubscribers = { lobby: Set(wsAlice), sports: Set(wsAlice) }
+node2.topicSubscribers = { lobby: Set(wsBob),   sports: Set(wsBob)   }
+
+// Per-connection sets ( inside the server )
+wsAlice.subscriptions = Set('lobby', 'sports')
+wsBob.subscriptions   = Set('lobby', 'sports')
+
+// RabbitMQ queue bindings
+node1Queue → ['lobby', 'sports']
+node2Queue → ['lobby', 'sports']
+```
+
+
+### Message Protocol
 
 Clients can continue sending plain text messages, which will be published to the default `lobby` topic.
 
@@ -23,181 +106,128 @@ For room-based behavior, send JSON messages with one of these actions:
 { "action": "list" }
 ```
 
-## Installation
+### Example Topic Flow
 
-```bash
-npm install
-```
-
-## Running the Server
-
-```bash
-npm start
-```
-
-The server will start listening on `ws://localhost:8080`
-
-## Testing
-
-You can test the WebSocket server using the browser client in the project root or any WebSocket client that can send JSON payloads.
-
-Browser flow:
-
-- Join with a name
-- Subscribe to a topic such as `sports`
-- Open a second browser tab, join with another name, and subscribe to the same topic
-- Send a message to that topic and only subscribers to that topic will receive it
-- Unsubscribe from the topic and verify new messages stop arriving
-
-Minimal JavaScript example:
-
-```html
-<!DOCTYPE html>
-<html>
-<head>
-    <title>WebSocket Client</title>
-</head>
-<body>
-    <h1>WebSocket Client</h1>
-    <input type="text" id="topicInput" value="lobby" placeholder="Topic">
-    <input type="text" id="messageInput" placeholder="Enter a message">
-    <button onclick="subscribe()">Subscribe</button>
-    <button onclick="unsubscribe()">Unsubscribe</button>
-    <button onclick="sendMessage()">Publish</button>
-    <div id="messages"></div>
-
-    <script>
-        const ws = new WebSocket('ws://localhost:8080?name=BrowserClient');
-
-        ws.onopen = () => {
-            console.log('Connected to server');
-        };
-
-        ws.onmessage = (event) => {
-            const messagesDiv = document.getElementById('messages');
-            messagesDiv.innerHTML += '<p>' + event.data + '</p>';
-        };
-
-        ws.onclose = () => {
-            console.log('Disconnected from server');
-        };
-
-        function subscribe() {
-            const topic = document.getElementById('topicInput').value.trim();
-            ws.send(JSON.stringify({ action: 'subscribe', topic }));
-        }
-
-        function unsubscribe() {
-            const topic = document.getElementById('topicInput').value.trim();
-            ws.send(JSON.stringify({ action: 'unsubscribe', topic }));
-        }
-
-        function sendMessage() {
-            const input = document.getElementById('messageInput');
-            const topic = document.getElementById('topicInput').value.trim();
-            ws.send(JSON.stringify({ action: 'publish', topic, message: input.value }));
-            input.value = '';
-        }
-    </script>
-</body>
-</html>
-```
-
-## Server Flow Diagram
-
-```mermaid
-graph TD
-    A[Client Connects] --> B[Send Welcome Message]
-    B --> C[Subscribe Client to lobby]
-    C --> D{Receive Action?}
-    D -->|Subscribe| E[Add Client to Topic]
-    D -->|Unsubscribe| F[Remove Client from Topic]
-    D -->|Publish| G[Broadcast Only to Topic Subscribers]
-    E --> D
-    F --> D
-    G --> D
-    D -->|Client Disconnects| H[Remove Client from All Topics]
-    H --> I[Log Disconnection]
-    I --> J[End]
-    D -->|Error| K[Log Error]
-    K --> J
-```
-
-## Example Topic Flow
-
-This example shows two clients, one topic named `sports`, and the server-side objects that change during the flow.
+This example shows the same topic named `sports`, but with the two clients connected to different WebSocket nodes. The local WebSocket nodes do not talk to each other directly. RabbitMQ is the bridge between them.
 
 ```mermaid
 sequenceDiagram
-        participant A as Client A
-        participant S as WebSocket Server
-        participant B as Client B
+        box Node 1
+            participant A as Client A (Alice)
+            participant S1 as WebSocket Node 1
+        end
 
-        A->>S: Connect with ?name=Alice
-        S-->>A: Welcome, Alice!
-        S-->>A: System: Subscribed to "lobby"
+        participant MQ as RabbitMQ Topic Exchange
 
-        B->>S: Connect with ?name=Bob
-        S-->>B: Welcome, Bob!
-        S-->>B: System: Subscribed to "lobby"
+        box Node 2
+            participant S2 as WebSocket Node 2
+            participant B as Client B (Bob)
+        end
 
-        A->>S: { action: "subscribe", topic: "sports" }
-        S-->>A: System: Subscribed to "sports"
+        A->>S1: Connect with ?name=Alice
+        S1-->>A: Welcome, Alice!
+        S1-->>A: System: Subscribed to "lobby"
 
-        B->>S: { action: "subscribe", topic: "sports" }
-        S-->>B: System: Subscribed to "sports"
+        B->>S2: Connect with ?name=Bob
+        S2-->>B: Welcome, Bob!
+        S2-->>B: System: Subscribed to "lobby"
 
-        A->>S: { action: "publish", topic: "sports", message: "Hello" }
-        S-->>A: [sports] Alice: Hello
-        S-->>B: [sports] Alice: Hello
+        A->>S1: { action: "subscribe", topic: "sports" }
+        S1->>MQ: Bind Node 1 queue to routing key sports
+        S1-->>A: System: Subscribed to "sports"
 
-        B->>S: { action: "unsubscribe", topic: "sports" }
-        S-->>B: System: Unsubscribed from "sports"
+        B->>S2: { action: "subscribe", topic: "sports" }
+        S2->>MQ: Bind Node 2 queue to routing key sports
+        S2-->>B: System: Subscribed to "sports"
 
-        A->>S: { action: "publish", topic: "sports", message: "Still there?" }
-        S-->>A: [sports] Alice: Still there?
+        A->>S1: { action: "publish", topic: "sports", message: "Hello" }
+        S1->>MQ: Publish message with routing key sports
+        MQ-->>S1: Deliver to Node 1 queue
+        MQ-->>S2: Deliver to Node 2 queue
+        S1-->>A: [sports] Alice: Hello
+        S2-->>B: [sports] Alice: Hello
+
+        B->>S2: { action: "unsubscribe", topic: "sports" }
+        S2->>MQ: Unbind sports if Bob was last local subscriber
+        S2-->>B: System: Unsubscribed from "sports"
+
+        A->>S1: { action: "publish", topic: "sports", message: "Still there?" }
+        S1->>MQ: Publish message with routing key sports
+        MQ-->>S1: Deliver to Node 1 queue
+        S1-->>A: [sports] Alice: Still there?
 ```
 
-## What Is Stored Where
+left to right flow:
 
-The server stores topic membership in two places so it can answer both questions efficiently: which topics a client has joined, and which clients belong to a topic.
+1. Each node keeps only its own local client connections.
+2. Each node binds its RabbitMQ queue to a topic only when that node has at least one local subscriber for that topic.
+3. Publishing goes to RabbitMQ once.
+4. RabbitMQ fans the message out to every node queue currently bound to that topic.
+5. Each node then sends the message only to its own connected clients for that topic.
 
-- `topicSubscribers` is a `Map` stored at server level.
-- Key: topic name such as `lobby` or `sports`.
-- Value: a `Set` of WebSocket client objects subscribed to that topic.
-- `ws.userName` is stored on each client connection object.
-- `ws.subscriptions` is a `Set` stored on each client connection object.
-- `ws.subscriptions` contains topic names for that one client.
 
-Example state after Alice and Bob both subscribe to `sports`:
+<br>
 
-```js
-topicSubscribers = {
-    lobby: Set(wsAlice, wsBob),
-    sports: Set(wsAlice, wsBob)
-}
+---
 
-wsAlice = {
-    userName: 'Alice',
-    subscriptions: Set('lobby', 'sports')
-}
+# Client Testing
 
-wsBob = {
-    userName: 'Bob',
-    subscriptions: Set('lobby', 'sports')
-}
-```
+You can test the WebSocket server using the browser client in the project root or any WebSocket client that can send JSON payloads.
 
-When Alice publishes to `sports`, the server:
+A full browser client is included in `index.html` in this repository. You can run this by using python ( python3 -m http.server ), or node ( npx http-server ) to serve the file and then opening it in your browser ( localhost:8080 ).
 
-1. Checks `wsAlice.subscriptions` to confirm Alice is allowed to publish there.
-2. Reads `topicSubscribers.get('sports')` to find all subscribed clients.
-3. Sends the formatted message to every open WebSocket in that set.
+Browser flow:
 
-## Server Behavior
+- Enter the WebSocket server URL (or use the default Railway URL)
+- Enter your name and click **Join** to connect
+- Subscribe to a topic such as `sports`, think of this as joining a chat room
+- Open a second browser tab, enter a different name, and subscribe to the same topic
+- Send a message to that topic and only subscribers to that topic will receive it
+- Unsubscribe from the topic and verify new messages stop arriving
 
-- When a client connects, they receive a welcome message and are subscribed to `lobby`
-- Clients can subscribe to additional topics or unsubscribe from them at runtime
-- Messages are published only to the selected topic and only delivered to subscribers of that topic
-- Plain text messages are treated as messages to the default `lobby` topic
-- The server logs all connections, disconnections, and messages to the console
+<br>
+
+---
+
+# Deploy and Test the Server
+
+Use Railway (or any cloud provider) to deploy the WebSocket server and RabbitMQ.
+
+### 1. Deploy RabbitMQ
+
+1. Go to Railway dashboard → **New Project** → **Deploy from Docker Image**
+2. Enter image: `rabbitmq:3-management`
+3. Set environment variables:
+   - `RABBITMQ_DEFAULT_USER=admin`
+   - `RABBITMQ_DEFAULT_PASS=strongpassword`
+   - `RABBITMQ_DEFAULT_VHOST=/` (allows multiple apps to coexist)
+4. *(Optional)* For the management UI, create a public URL in **Settings → Network** and expose port `15672`
+5. Add a volume at `/var/lib/rabbitmq` for data persistence
+
+### 2. Deploy Server Instances
+
+For each server instance (repeat steps for Server 1 and Server 2):
+
+1. Create a new service → **Deploy from Git** (select this repo)
+2. Railway auto-detects the Dockerfile and builds the image
+3. In **Settings → Network**, create a public URL (you'll need this for client testing)
+4. In **Variables**, add:
+   - `RABBITMQ_URL=amqp://admin:strongpassword@rabbitmq.railway.internal:5672`
+   - (Replace hostname with your RabbitMQ service URL if different)
+5. Deploy the service
+
+Repeat for a second server instance to test multi-node messaging.
+
+### 3. Test with the Client
+
+1. Serve the `index.html` file locally:
+   - Python: `python3 -m http.server`
+   - Node: `npx http-server`
+2. Open `http://localhost:8000` in your browser
+3. Enter the public URL of Server 1 (e.g., `wss://your-server-1-url.railway.app`)
+4. Enter your name and click **Join**
+5. Open a second tab and connect to Server 2 with its public URL (e.g., `wss://your-server-2-url.railway.app`) using a different name
+6. Subscribe to the same topic (e.g., `sports`) in both tabs
+7. Send a message from one tab—it will appear in the other, proving cross-node communication works
+
+Check server logs to verify that RabbitMQ is routing messages and that topic bindings are dynamically added/removed as clients subscribe/unsubscribe.
